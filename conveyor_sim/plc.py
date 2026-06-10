@@ -12,13 +12,17 @@ Two modes:
 * ModbusClientLink: the sim is the Modbus TCP *client*, for PLCs that expose
   a built-in Modbus server. Sensor bits are written to PLC coils at
   --in-base, actuator commands are read from PLC coils at --out-base.
+
+* McProtocolLink: Mitsubishi MC protocol (pymcprotocol). The PLC program runs
+  with G_IsSimulated=TRUE so its inputs come from M devices: the sim batch-
+  writes sensor bits to M200..M211 and batch-reads commands from Y0..Y16.
 """
 import socketserver
 import struct
 import threading
 import time
 
-from .iomap import N_IN, N_OUT
+from .iomap import MC_M_BASE, MC_Y_DEVICES, N_IN, N_OUT
 
 
 def _pack_bits(bits):
@@ -261,6 +265,70 @@ class ModbusClientLink:
         return f"{self._desc} | {'OK' if self.ok else 'reconnecting...'}"
 
 
+class McProtocolLink:
+    """Mitsubishi MC protocol client (3E frame) via pymcprotocol.
+
+    The PLC must run with G_IsSimulated=TRUE: sensors are written to
+    M<m_base>.. in iomap order and commands are read from the Y devices in
+    MC_Y_DEVICES. Y numbering is octal by default (FX style: Y7 -> Y10);
+    pass y_radix=16 for hex-numbered (Q/iQ) outputs.
+    """
+
+    def __init__(self, host, port=5007, plctype="Q", m_base=MC_M_BASE,
+                 y_radix=8):
+        import pymcprotocol
+        self._mc = pymcprotocol.Type3E(plctype=plctype)
+        self._host, self._port = host, port
+        self._head_m = f"M{m_base}"
+        y_nums = [int(d[1:], y_radix) for d in MC_Y_DEVICES]
+        self._y_index = [n - y_nums[0] for n in y_nums]
+        self._y_count = self._y_index[-1] + 1
+        self._y_head = MC_Y_DEVICES[0]
+        self._lock = threading.Lock()
+        self._in_bits = [False] * N_IN
+        self._out_bits = [False] * N_OUT
+        self.ok = False
+        self._connected = False
+        self._desc = f"MC protocol -> {host}:{port} " \
+                     f"(sensors @{self._head_m}+, cmds @Y, plctype {plctype})"
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                if not self._connected:
+                    self._mc.connect(self._host, self._port)
+                    self._connected = True
+                with self._lock:
+                    in_bits = [int(b) for b in self._in_bits]
+                self._mc.batchwrite_bitunits(self._head_m, in_bits)
+                ys = self._mc.batchread_bitunits(self._y_head, self._y_count)
+                with self._lock:
+                    self._out_bits = [bool(ys[i]) for i in self._y_index]
+                self.ok = True
+                time.sleep(0.02)
+            except Exception:
+                self.ok = False
+                self._connected = False
+                try:
+                    self._mc.close()
+                except Exception:
+                    pass
+                time.sleep(1.0)
+
+    def push_inputs(self, bits):
+        with self._lock:
+            self._in_bits = list(bits)
+
+    def pull_outputs(self):
+        with self._lock:
+            return list(self._out_bits)
+
+    @property
+    def status(self):
+        return f"{self._desc} | {'OK' if self.ok else 'reconnecting...'}"
+
+
 def make_link(args):
     if args.mode == "server":
         return ModbusServerLink(args.host or "0.0.0.0", args.port or 5020)
@@ -269,4 +337,9 @@ def make_link(args):
             raise SystemExit("--mode client requires --host <PLC address>")
         return ModbusClientLink(args.host, args.port or 502, args.device_id,
                                 args.in_base, args.out_base)
+    if args.mode == "mc":
+        if not args.host:
+            raise SystemExit("--mode mc requires --host <PLC address>")
+        return McProtocolLink(args.host, args.port or 5007, args.plctype,
+                              args.m_base, 16 if args.y_radix == "hex" else 8)
     return ManualLink()

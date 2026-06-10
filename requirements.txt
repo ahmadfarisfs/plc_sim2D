@@ -1,3 +1,4 @@
 pygame>=2.6
 pymunk>=7.0
 pymodbus>=3.6
+pymcprotocol>=0.3

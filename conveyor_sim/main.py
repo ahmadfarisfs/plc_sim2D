@@ -9,7 +9,7 @@ import sys
 import pygame
 
 from . import world as wd
-from .iomap import IN_NAMES, OUT_NAMES, Outputs
+from .iomap import IN_NAMES, MC_M_BASE, MC_Y_DEVICES, OUT_NAMES, Outputs
 from .plc import make_link
 
 WIN_W, WIN_H = wd.W, 900
@@ -32,18 +32,19 @@ WARN = (200, 120, 30)
 
 # manual-mode key bindings (toggles)
 KEYMAP = {
-    pygame.K_1: "Q_LftA_Up", pygame.K_2: "Q_LftA_Down",
-    pygame.K_3: "Q_LftA_Fwd", pygame.K_4: "Q_LftA_Rev",
-    pygame.K_5: "Q_Conv_Run",
-    pygame.K_6: "Q_LftB_Up", pygame.K_7: "Q_LftB_Down",
-    pygame.K_8: "Q_LftB_Fwd", pygame.K_9: "Q_LftB_Rev",
-    pygame.K_0: "Q_Lamp_Ready",
+    pygame.K_1: "O_LftA_LiftUp", pygame.K_2: "O_LftA_LiftDown",
+    pygame.K_3: "O_LftA_BeltFwd", pygame.K_4: "O_LftA_BeltRev",
+    pygame.K_5: "O_Conv_BeltFwd",
+    pygame.K_6: "O_LftB_LiftUp", pygame.K_7: "O_LftB_LiftDown",
+    pygame.K_8: "O_LftB_BeltFwd", pygame.K_9: "O_LftB_BeltRev",
+    pygame.K_0: "O_Pnl_MachineReady",
+    pygame.K_MINUS: "O_Pnl_Alarm",
 }
 OPPOSITE = {
-    "Q_LftA_Up": "Q_LftA_Down", "Q_LftA_Down": "Q_LftA_Up",
-    "Q_LftA_Fwd": "Q_LftA_Rev", "Q_LftA_Rev": "Q_LftA_Fwd",
-    "Q_LftB_Up": "Q_LftB_Down", "Q_LftB_Down": "Q_LftB_Up",
-    "Q_LftB_Fwd": "Q_LftB_Rev", "Q_LftB_Rev": "Q_LftB_Fwd",
+    "O_LftA_LiftUp": "O_LftA_LiftDown", "O_LftA_LiftDown": "O_LftA_LiftUp",
+    "O_LftA_BeltFwd": "O_LftA_BeltRev", "O_LftA_BeltRev": "O_LftA_BeltFwd",
+    "O_LftB_LiftUp": "O_LftB_LiftDown", "O_LftB_LiftDown": "O_LftB_LiftUp",
+    "O_LftB_BeltFwd": "O_LftB_BeltRev", "O_LftB_BeltRev": "O_LftB_BeltFwd",
 }
 
 
@@ -54,7 +55,7 @@ class Panel:
     """
 
     def __init__(self, x, y):
-        self.rect = pygame.Rect(x, y, 330, 130)
+        self.rect = pygame.Rect(x, y, 400, 130)
         self.estop_pressed = False    # mushroom latched in (click toggles)
         self.pb_start = False         # True while the mouse holds the button
         self.pb_seq = False
@@ -63,6 +64,7 @@ class Panel:
         self.start_c = (x + 140, cy)
         self.seq_c = (x + 225, cy)
         self.led_c = (x + 295, cy)
+        self.alarm_c = (x + 360, cy)
 
     @staticmethod
     def _hit(p, c, r):
@@ -86,7 +88,7 @@ class Panel:
         self.pb_seq = False
 
 
-def draw_panel(surf, panel, lamp_on, f12):
+def draw_panel(surf, panel, ready_on, alarm_on, f12):
     pygame.draw.rect(surf, (232, 233, 238), panel.rect, border_radius=6)
     pygame.draw.rect(surf, (150, 150, 160), panel.rect, 2, border_radius=6)
     surf.blit(f12.render("OPERATOR PANEL (click)", True, TXT),
@@ -114,29 +116,100 @@ def draw_panel(surf, panel, lamp_on, f12):
     label(panel.start_c, ["START", "MACHINE"])
     label(panel.seq_c, ["START", "SEQUENCE"])
 
-    x, y = panel.led_c
-    pygame.draw.circle(surf, (60, 220, 90) if lamp_on else (180, 185, 190), (x, y), 11)
-    pygame.draw.circle(surf, (110, 110, 120), (x, y), 11, 2)
-    if lamp_on:
-        pygame.draw.circle(surf, (60, 220, 90), (x, y), 16, 2)
-    label(panel.led_c, ["READY"])
+    for c, on, color, name in ((panel.led_c, ready_on, (60, 220, 90), "READY"),
+                               (panel.alarm_c, alarm_on, (235, 60, 60), "ALARM")):
+        x, y = c
+        pygame.draw.circle(surf, color if on else (180, 185, 190), (x, y), 11)
+        pygame.draw.circle(surf, (110, 110, 120), (x, y), 11, 2)
+        if on:
+            pygame.draw.circle(surf, color, (x, y), 16, 2)
+        label(c, [name], color if on else TXT)
+
+
+class Button:
+    """Small on-screen button: toggles an output signal or runs an action."""
+
+    def __init__(self, x, y, w, label, signal=None, action=None):
+        self.rect = pygame.Rect(x, y, w, 22)
+        self.label = label
+        self.signal = signal     # output name on manual_out (toggle)
+        self.action = action     # "spawn" / "clear" (momentary)
+
+
+def make_buttons():
+    y = wd.FLOOR_Y + 10
+    btns = []
+
+    def strip(x, items, w=50, gap=4):
+        for label, sig in items:
+            btns.append(Button(x, y, w, label, signal=sig))
+            x += w + gap
+
+    strip(wd.LIFT_A_X0, [("A up", "O_LftA_LiftUp"), ("A dn", "O_LftA_LiftDown"),
+                         ("A fwd", "O_LftA_BeltFwd"), ("A rev", "O_LftA_BeltRev")])
+    strip(560, [("conv run", "O_Conv_BeltFwd")], w=82)
+    strip(656, [("ready", "O_Pnl_MachineReady"), ("alarm", "O_Pnl_Alarm")], w=56)
+    btns.append(Button(880, y, 60, "spawn", action="spawn"))
+    btns.append(Button(944, y, 60, "clear", action="clear"))
+    strip(wd.LIFT_B_X0 - 16, [("B up", "O_LftB_LiftUp"), ("B dn", "O_LftB_LiftDown"),
+                              ("B fwd", "O_LftB_BeltFwd"), ("B rev", "O_LftB_BeltRev")])
+    return btns
+
+
+def buttons_click(buttons, pos, world, manual_out):
+    """Returns 'toggled' if an output button was used, True if any button hit."""
+    for b in buttons:
+        if not b.rect.collidepoint(pos):
+            continue
+        if b.action == "spawn":
+            world.spawn_box()
+        elif b.action == "clear":
+            world.clear_boxes()
+        else:
+            val = not getattr(manual_out, b.signal)
+            setattr(manual_out, b.signal, val)
+            if val and b.signal in OPPOSITE:
+                setattr(manual_out, OPPOSITE[b.signal], False)
+            return "toggled"
+        return True
+    return False
+
+
+def draw_buttons(surf, buttons, outs, f12):
+    for b in buttons:
+        on = b.signal is not None and getattr(outs, b.signal)
+        fill = (140, 215, 160) if on else (224, 225, 230)
+        pygame.draw.rect(surf, fill, b.rect, border_radius=4)
+        pygame.draw.rect(surf, (130, 130, 140), b.rect, 1, border_radius=4)
+        t = f12.render(b.label, True, TXT)
+        surf.blit(t, (b.rect.centerx - t.get_width() // 2,
+                      b.rect.centery - t.get_height() // 2))
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Conveyor rig physics sim + Modbus TCP")
-    p.add_argument("--mode", choices=["server", "client", "none"], default="server",
+    p = argparse.ArgumentParser(
+        description="Conveyor rig physics sim + Modbus TCP / Mitsubishi MC protocol")
+    p.add_argument("--mode", choices=["server", "client", "mc", "none"],
+                   default="server",
                    help="server: sim is Modbus slave, PLC polls it (default). "
                         "client: sim polls the PLC's Modbus server. "
+                        "mc: Mitsubishi MC protocol, sensors -> M200.., cmds <- Y. "
                         "none: manual keyboard control only")
     p.add_argument("--host", default=None,
-                   help="bind address (server, default 0.0.0.0) or PLC IP (client)")
+                   help="bind address (server, default 0.0.0.0) or PLC IP (client/mc)")
     p.add_argument("--port", type=int, default=None,
-                   help="TCP port (default: 5020 server / 502 client)")
+                   help="TCP port (default: 5020 server / 502 client / 5007 mc)")
     p.add_argument("--device-id", type=int, default=1, help="Modbus unit/device id (client mode)")
     p.add_argument("--in-base", type=int, default=0,
                    help="client mode: PLC coil address where sensor bits are written")
     p.add_argument("--out-base", type=int, default=16,
                    help="client mode: PLC coil address where actuator commands are read")
+    p.add_argument("--plctype", choices=["Q", "L", "QnA", "iQ-L", "iQ-R"],
+                   default="Q", help="mc mode: pymcprotocol PLC series (default Q)")
+    p.add_argument("--m-base", type=int, default=200,
+                   help="mc mode: first M device for sensor bits (default M200)")
+    p.add_argument("--y-radix", choices=["oct", "hex"], default="oct",
+                   help="mc mode: Y device numbering (FX is octal: Y7 -> Y10)")
     p.add_argument("--frames", type=int, default=0,
                    help="exit after N frames (testing)")
     p.add_argument("--screenshot", default=None,
@@ -234,21 +307,23 @@ def draw_hud(surf, fonts, ins, outs, link_status, manual, n_boxes):
         "C clear boxes | M toggle manual/PLC | ESC quit", True, DIM),
         (20, HUD_Y + 32))
     surf.blit(f14.render(
-        "manual keys:  1/2 LiftA up/down   3/4 LiftA belt fwd/rev   "
-        "5 long conveyor   6/7 LiftB up/down   8/9 LiftB belt fwd/rev   "
-        "0 ready lamp",
+        "manual: click the small buttons, or keys  1/2 LiftA up/down   "
+        "3/4 LiftA belt fwd/rev   5 long conveyor   6/7 LiftB up/down   "
+        "8/9 LiftB belt fwd/rev   0 ready   - alarm",
         True, DIM if not manual else TXT), (20, HUD_Y + 54))
 
-    def column(x, title, names, values, addr_label):
+    def column(x, title, names, values, addrs):
         surf.blit(f14.render(title, True, TXT), (x, HUD_Y + 84))
         for i, (n, v) in enumerate(zip(names, values)):
             y = HUD_Y + 108 + i * 14
             pygame.draw.circle(surf, OK_GREEN if v else (205, 205, 210), (x + 6, y + 6), 5)
-            surf.blit(f12.render(f"{addr_label}{i}  {n}", True, TXT if v else DIM),
+            surf.blit(f12.render(f"{addrs[i]:>4}  {n}", True, TXT if v else DIM),
                       (x + 18, y))
 
-    column(20, "sensors -> PLC (discrete inputs, FC02)", IN_NAMES, ins.to_bits(), "DI ")
-    column(560, "PLC -> actuators (coils, FC01/05/15)", OUT_NAMES, outs.to_bits(), "C ")
+    column(20, "sensors -> PLC (M devices / Modbus DI)", IN_NAMES, ins.to_bits(),
+           [f"M{MC_M_BASE + i}" for i in range(len(IN_NAMES))])
+    column(560, "PLC -> actuators (Y devices / Modbus coils)", OUT_NAMES,
+           outs.to_bits(), MC_Y_DEVICES)
 
 
 def main(argv=None):
@@ -264,6 +339,7 @@ def main(argv=None):
 
     world = wd.World()
     panel = Panel(40, 36)
+    buttons = make_buttons()
     manual = args.mode == "none"
     manual_out = Outputs()
     dt = 1.0 / 60.0
@@ -291,7 +367,11 @@ def main(argv=None):
                         setattr(manual_out, OPPOSITE[name], False)
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                 if not panel.mouse_down(e.pos):
-                    world.grab(e.pos)
+                    hit = buttons_click(buttons, e.pos, world, manual_out)
+                    if hit == "toggled":
+                        manual = True    # motor buttons drive manual control
+                    elif not hit:
+                        world.grab(e.pos)
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 3:
                 world.spawn_box(e.pos)
             elif e.type == pygame.MOUSEMOTION:
@@ -306,13 +386,14 @@ def main(argv=None):
             outs = Outputs.from_bits(link.pull_outputs())
 
         ins = world.update(outs, dt)
-        ins.I_EStop_NC = not panel.estop_pressed   # NC: contact opens when pressed
-        ins.I_PB_Start = panel.pb_start
-        ins.I_PB_Seq = panel.pb_seq
+        ins.I_Pnl_EStop = not panel.estop_pressed   # NC: contact opens when pressed
+        ins.I_Pnl_MachineStartPB = panel.pb_start
+        ins.I_Pnl_SeqStartPB = panel.pb_seq
         link.push_inputs(ins.to_bits())
 
         draw_world(screen, world, f12)
-        draw_panel(screen, panel, outs.Q_Lamp_Ready, f12)
+        draw_panel(screen, panel, outs.O_Pnl_MachineReady, outs.O_Pnl_Alarm, f12)
+        draw_buttons(screen, buttons, outs, f12)
         draw_hud(screen, (f12, f14), ins, outs, link.status, manual, len(world.boxes))
         pygame.display.flip()
         clock.tick(60)

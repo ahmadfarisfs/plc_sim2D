@@ -35,8 +35,8 @@ def main():
     print("  FC04 input register 0 packed word OK")
 
     # PLC writes coils -> sim actuators (FC15 multiple)
-    cmds = [False, True, False, False, True,
-            False, False, True, True, True][:N_OUT]
+    cmds = [False, True, False, False, True, False,
+            False, True, True, True, False, True][:N_OUT]
     assert len(cmds) == N_OUT
     rr = c.write_coils(0, list(cmds))   # copy: pymodbus pads the list in place
     assert not rr.isError(), rr

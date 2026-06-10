@@ -30,7 +30,9 @@ SPAWN_POS = (1060.0, 140.0)
 MAX_BOXES = 15
 
 CAT_BOX = 0b1
+CAT_FRAME = 0b10
 BOX_FILTER = pymunk.ShapeFilter(mask=CAT_BOX)
+FRAME_FILTER = pymunk.ShapeFilter(categories=CAT_FRAME)
 SENSOR_RANGE = 2.0
 LIMIT_TOL = 1.0
 
@@ -51,6 +53,7 @@ class Lift:
         self.body.position = ((x0 + x1) / 2, self.y_hi)
         self.shape = pymunk.Poly.create_box(self.body, (x1 - x0, BELT_H))
         self.shape.friction = 0.9
+        self.shape.filter = FRAME_FILTER
         space.add(self.body, self.shape)
 
     @property
@@ -121,6 +124,7 @@ class World:
             s = pymunk.Segment(self.space.static_body,
                                (x, WALL_Y0), (x, FLOOR_Y), 3.0)
             s.friction = 0.3
+            s.filter = FRAME_FILTER
             self.space.add(s)
 
         self.lift_a = Lift(self.space, LIFT_A_X0, LIFT_A_X1)
@@ -131,7 +135,7 @@ class World:
             Sensor("I_LftA_BeltEnd",
                    lambda: (LIFT_A_X0 + 22, self.lift_a.surface_y - above)),
             Sensor("I_Placon_Full", lambda: (PLACON_X0 + 28, Y_TOP - above)),
-            Sensor("I_Conv_Det", lambda: (LONG_X0 + 50, Y_BOT - above)),
+            Sensor("I_Conv_BeltEnd", lambda: (LONG_X0 + 50, Y_BOT - above)),
             Sensor("I_LftB_BeltStart",
                    lambda: (LIFT_B_X0 + 22, self.lift_b.surface_y - above)),
             Sensor("I_LftB_BeltEnd",
@@ -146,6 +150,7 @@ class World:
                         [(x0, y_surface), (x1, y_surface),
                          (x1, y_surface + BELT_H), (x0, y_surface + BELT_H)])
         s.friction = friction
+        s.filter = FRAME_FILTER
         self.space.add(s)
         return s
 
@@ -172,7 +177,8 @@ class World:
     def grab(self, p):
         self.release()
         hit = self.space.point_query_nearest(p, 8.0, BOX_FILTER)
-        if hit is None:
+        if hit is None or hit.shape is None \
+                or hit.shape.body.body_type != pymunk.Body.DYNAMIC:
             return False
         self.mouse_body.position = p
         j = pymunk.PivotJoint(self.mouse_body, hit.shape.body, (0, 0),
@@ -193,13 +199,13 @@ class World:
 
     # --- simulation step ---
     def update(self, out: Outputs, dt: float, substeps: int = 2) -> Inputs:
-        self.lift_a.drive(out.Q_LftA_Up, out.Q_LftA_Down,
-                          out.Q_LftA_Fwd, out.Q_LftA_Rev, dt)
-        self.lift_b.drive(out.Q_LftB_Up, out.Q_LftB_Down,
-                          out.Q_LftB_Fwd, out.Q_LftB_Rev, dt)
+        self.lift_a.drive(out.O_LftA_LiftUp, out.O_LftA_LiftDown,
+                          out.O_LftA_BeltFwd, out.O_LftA_BeltRev, dt)
+        self.lift_b.drive(out.O_LftB_LiftUp, out.O_LftB_LiftDown,
+                          out.O_LftB_BeltFwd, out.O_LftB_BeltRev, dt)
         # long conveyor is single-direction by construction (leftward)
         self.long.surface_velocity = \
-            (-LONG_SPEED if out.Q_Conv_Run else 0.0, 0.0)
+            (-LONG_SPEED if out.O_Conv_BeltFwd else 0.0, 0.0)
 
         sub = dt / substeps
         for _ in range(substeps):
@@ -217,8 +223,8 @@ class World:
         ins = Inputs()
         for s in self.sensors:
             setattr(ins, s.name, s.active)
-        ins.I_LftA_Up = self.lift_a.at_top
-        ins.I_LftA_Down = self.lift_a.at_bottom
-        ins.I_LftB_Up = self.lift_b.at_top
-        ins.I_LftB_Down = self.lift_b.at_bottom
+        ins.I_LftA_UpLimit = self.lift_a.at_top
+        ins.I_LftA_DnLimit = self.lift_a.at_bottom
+        ins.I_LftB_UpLimit = self.lift_b.at_top
+        ins.I_LftB_DnLimit = self.lift_b.at_bottom
         return ins
