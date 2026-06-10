@@ -223,6 +223,7 @@ class ModbusClientLink:
         self._in_bits = [False] * N_IN
         self._out_bits = [False] * N_OUT
         self.ok = False
+        self.last_error = ""
         self._desc = f"Modbus client -> {host}:{port} " \
                      f"(sensors @coil {in_base}+, cmds @coil {out_base}+)"
         threading.Thread(target=self._loop, daemon=True).start()
@@ -242,15 +243,23 @@ class ModbusClientLink:
                                              device_id=self._device_id)
                 if rr.isError():
                     self.ok = False
+                    self._note_error(str(rr))
                 else:
                     with self._lock:
                         self._out_bits = [bool(b) for b in rr.bits[:N_OUT]]
                     self.ok = True
+                    self.last_error = ""
                 time.sleep(0.02)
-            except Exception:
+            except Exception as e:
                 self.ok = False
+                self._note_error(f"{type(e).__name__}: {e}")
                 self._client.close()
                 time.sleep(1.0)
+
+    def _note_error(self, err):
+        if err != self.last_error:
+            print(f"[modbus] {err}", flush=True)
+            self.last_error = err
 
     def push_inputs(self, bits):
         with self._lock:
@@ -262,7 +271,10 @@ class ModbusClientLink:
 
     @property
     def status(self):
-        return f"{self._desc} | {'OK' if self.ok else 'reconnecting...'}"
+        if self.ok:
+            return f"{self._desc} | OK"
+        detail = f" ({self.last_error})" if self.last_error else ""
+        return f"{self._desc} | reconnecting...{detail}"
 
 
 class McProtocolLink:
@@ -289,6 +301,7 @@ class McProtocolLink:
         self._out_bits = [False] * N_OUT
         self.ok = False
         self._connected = False
+        self.last_error = ""
         self._desc = f"MC protocol -> {host}:{port} " \
                      f"(sensors @{self._head_m}+, cmds @Y, plctype {plctype})"
         threading.Thread(target=self._loop, daemon=True).start()
@@ -306,10 +319,15 @@ class McProtocolLink:
                 with self._lock:
                     self._out_bits = [bool(ys[i]) for i in self._y_index]
                 self.ok = True
+                self.last_error = ""
                 time.sleep(0.02)
-            except Exception:
+            except Exception as e:
                 self.ok = False
                 self._connected = False
+                err = f"{type(e).__name__}: {e}"
+                if err != self.last_error:
+                    print(f"[mc] {err}", flush=True)
+                    self.last_error = err
                 try:
                     self._mc.close()
                 except Exception:
@@ -326,7 +344,10 @@ class McProtocolLink:
 
     @property
     def status(self):
-        return f"{self._desc} | {'OK' if self.ok else 'reconnecting...'}"
+        if self.ok:
+            return f"{self._desc} | OK"
+        detail = f" ({self.last_error})" if self.last_error else ""
+        return f"{self._desc} | reconnecting...{detail}"
 
 
 def make_link(args):
