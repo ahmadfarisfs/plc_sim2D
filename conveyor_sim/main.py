@@ -48,26 +48,33 @@ OPPOSITE = {
 }
 
 
+PANEL_W, PANEL_H = 400, 130    # native size of the panel artwork
+PANEL_SCALE = 0.5               # panel is drawn at this fraction of native size
+
+
 class Panel:
     """Operator panel: latching E-stop (NC), two momentary PBs, ready lamp.
 
     No behavior lives here — the contacts/lamp are raw I/O for the PLC.
+    Drawn at PANEL_SCALE of its native size; hit-test geometry below is
+    scaled to match.
     """
 
     def __init__(self, x, y):
-        self.rect = pygame.Rect(x, y, 400, 130)
+        self.rect = pygame.Rect(x, y, int(PANEL_W * PANEL_SCALE), int(PANEL_H * PANEL_SCALE))
         self.estop_pressed = False    # mushroom latched in (click toggles)
         self.pb_start = False         # True while the mouse holds the button
         self.pb_seq = False
-        cy = y + 62
-        self.estop_c = (x + 55, cy)
-        self.start_c = (x + 140, cy)
-        self.seq_c = (x + 225, cy)
-        self.led_c = (x + 295, cy)
-        self.alarm_c = (x + 360, cy)
+        cy = y + 62 * PANEL_SCALE
+        self.estop_c = (x + 55 * PANEL_SCALE, cy)
+        self.start_c = (x + 140 * PANEL_SCALE, cy)
+        self.seq_c = (x + 225 * PANEL_SCALE, cy)
+        self.led_c = (x + 295 * PANEL_SCALE, cy)
+        self.alarm_c = (x + 360 * PANEL_SCALE, cy)
 
     @staticmethod
     def _hit(p, c, r):
+        r *= PANEL_SCALE
         return (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2 <= r * r
 
     def mouse_down(self, p):
@@ -89,41 +96,51 @@ class Panel:
 
 
 def draw_panel(surf, panel, ready_on, alarm_on, f12):
-    pygame.draw.rect(surf, (232, 233, 238), panel.rect, border_radius=6)
-    pygame.draw.rect(surf, (150, 150, 160), panel.rect, 2, border_radius=6)
-    surf.blit(f12.render("OPERATOR PANEL (click)", True, TXT),
-              (panel.rect.x + 10, panel.rect.y + 8))
+    """Draw the operator panel artwork at native size, then scale it down
+    by PANEL_SCALE onto surf (see Panel.__init__ for the matching geometry).
+    """
+    tmp = pygame.Surface((PANEL_W, PANEL_H), pygame.SRCALPHA)
+    rect0 = tmp.get_rect()
+    pygame.draw.rect(tmp, (232, 233, 238), rect0, border_radius=6)
+    pygame.draw.rect(tmp, (150, 150, 160), rect0, 2, border_radius=6)
+    tmp.blit(f12.render("OPERATOR PANEL (click)", True, TXT), (10, 8))
+
+    cy = 62
+    estop_c, start_c, seq_c, led_c, alarm_c = \
+        (55, cy), (140, cy), (225, cy), (295, cy), (360, cy)
 
     def label(c, lines, color=TXT):
         for i, ln in enumerate(lines):
             t = f12.render(ln, True, color)
-            surf.blit(t, (c[0] - t.get_width() // 2, c[1] + 30 + 13 * i))
+            tmp.blit(t, (c[0] - t.get_width() // 2, c[1] + 30 + 13 * i))
 
     # E-stop: yellow base, red mushroom, latches in when clicked
-    x, y = panel.estop_c
-    pygame.draw.circle(surf, (240, 200, 40), (x, y), 26)
+    x, y = estop_c
+    pygame.draw.circle(tmp, (240, 200, 40), (x, y), 26)
     r = 17 if panel.estop_pressed else 21
-    pygame.draw.circle(surf, (160, 20, 20) if panel.estop_pressed else (215, 40, 40),
+    pygame.draw.circle(tmp, (160, 20, 20) if panel.estop_pressed else (215, 40, 40),
                        (x, y), r)
-    label(panel.estop_c, ["E-STOP", "PRESSED" if panel.estop_pressed else "(NC)"],
+    label(estop_c, ["E-STOP", "PRESSED" if panel.estop_pressed else "(NC)"],
           (180, 30, 30) if panel.estop_pressed else TXT)
 
-    for c, held, color in ((panel.start_c, panel.pb_start, (40, 160, 70)),
-                           (panel.seq_c, panel.pb_seq, (40, 110, 200))):
-        pygame.draw.circle(surf, (120, 120, 130), c, 20)
+    for c, held, color in ((start_c, panel.pb_start, (40, 160, 70)),
+                           (seq_c, panel.pb_seq, (40, 110, 200))):
+        pygame.draw.circle(tmp, (120, 120, 130), c, 20)
         shade = tuple(int(v * 0.6) for v in color) if held else color
-        pygame.draw.circle(surf, shade, c, 16 if held else 18)
-    label(panel.start_c, ["START", "MACHINE"])
-    label(panel.seq_c, ["START", "SEQUENCE"])
+        pygame.draw.circle(tmp, shade, c, 16 if held else 18)
+    label(start_c, ["START", "MACHINE"])
+    label(seq_c, ["START", "SEQUENCE"])
 
-    for c, on, color, name in ((panel.led_c, ready_on, (60, 220, 90), "READY"),
-                               (panel.alarm_c, alarm_on, (235, 60, 60), "ALARM")):
+    for c, on, color, name in ((led_c, ready_on, (60, 220, 90), "READY"),
+                               (alarm_c, alarm_on, (235, 60, 60), "ALARM")):
         x, y = c
-        pygame.draw.circle(surf, color if on else (180, 185, 190), (x, y), 11)
-        pygame.draw.circle(surf, (110, 110, 120), (x, y), 11, 2)
+        pygame.draw.circle(tmp, color if on else (180, 185, 190), (x, y), 11)
+        pygame.draw.circle(tmp, (110, 110, 120), (x, y), 11, 2)
         if on:
-            pygame.draw.circle(surf, color, (x, y), 16, 2)
+            pygame.draw.circle(tmp, color, (x, y), 16, 2)
         label(c, [name], color if on else TXT)
+
+    surf.blit(pygame.transform.smoothscale(tmp, panel.rect.size), panel.rect.topleft)
 
 
 class Button:
@@ -228,8 +245,9 @@ def draw_arrow(surf, color, a, b, w=3):
 
 def draw_belt_rect(surf, x0, x1, y, running=False):
     r = pygame.Rect(x0, y, x1 - x0, wd.BELT_H)
-    pygame.draw.rect(surf, BELT_RUN if running else BELT_FILL, r)
-    pygame.draw.rect(surf, BELT_EDGE, r, 1)
+    radius = int(wd.BELT_H / 2)
+    pygame.draw.rect(surf, BELT_RUN if running else BELT_FILL, r, border_radius=radius)
+    pygame.draw.rect(surf, BELT_EDGE, r, 1, border_radius=radius)
     return r
 
 
@@ -326,13 +344,30 @@ def draw_hud(surf, fonts, ins, outs, link_status, manual, n_boxes):
            outs.to_bits(), MC_Y_DEVICES)
 
 
+def fit_canvas(screen_size):
+    """Scale/offset to fit the fixed-size canvas into the window, letterboxed."""
+    sw, sh = screen_size
+    scale = max(min(sw / WIN_W, sh / WIN_H), 0.01)
+    ox = (sw - WIN_W * scale) / 2
+    oy = (sh - WIN_H * scale) / 2
+    return scale, ox, oy
+
+
+def to_canvas(pos, scale, ox, oy):
+    return ((pos[0] - ox) / scale, (pos[1] - oy) / scale)
+
+
 def main(argv=None):
     args = parse_args(argv)
     link = make_link(args)
 
     pygame.init()
-    screen = pygame.display.set_mode((WIN_W, WIN_H))
+    screen = pygame.display.set_mode((WIN_W, WIN_H), pygame.RESIZABLE)
     pygame.display.set_caption("conveyor rig sim - Modbus TCP")
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.user32.ShowWindow(pygame.display.get_wm_info()["window"], 3)  # SW_MAXIMIZE
+    canvas = pygame.Surface((WIN_W, WIN_H))
     clock = pygame.time.Clock()
     f12 = pygame.font.SysFont("menlo, monaco, consolas, monospace", 12)
     f14 = pygame.font.SysFont("menlo, monaco, consolas, monospace", 14)
@@ -345,11 +380,15 @@ def main(argv=None):
     dt = 1.0 / 60.0
     frame = 0
     running = True
+    scale, ox, oy = fit_canvas(screen.get_size())
 
     while running:
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
                 running = False
+            elif e.type == pygame.VIDEORESIZE:
+                screen = pygame.display.set_mode(e.size, pygame.RESIZABLE)
+                scale, ox, oy = fit_canvas(screen.get_size())
             elif e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
                     running = False
@@ -366,16 +405,17 @@ def main(argv=None):
                     if val and name in OPPOSITE:
                         setattr(manual_out, OPPOSITE[name], False)
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-                if not panel.mouse_down(e.pos):
-                    hit = buttons_click(buttons, e.pos, world, manual_out)
+                pos = to_canvas(e.pos, scale, ox, oy)
+                if not panel.mouse_down(pos):
+                    hit = buttons_click(buttons, pos, world, manual_out)
                     if hit == "toggled":
                         manual = True    # motor buttons drive manual control
                     elif not hit:
-                        world.grab(e.pos)
+                        world.grab(pos)
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 3:
-                world.spawn_box(e.pos)
+                world.spawn_box(to_canvas(e.pos, scale, ox, oy))
             elif e.type == pygame.MOUSEMOTION:
-                world.move_mouse(e.pos)
+                world.move_mouse(to_canvas(e.pos, scale, ox, oy))
             elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
                 panel.mouse_up()
                 world.release()
@@ -391,17 +431,23 @@ def main(argv=None):
         ins.I_Pnl_SeqStartPB = panel.pb_seq
         link.push_inputs(ins.to_bits())
 
-        draw_world(screen, world, f12)
-        draw_panel(screen, panel, outs.O_Pnl_MachineReady, outs.O_Pnl_Alarm, f12)
-        draw_buttons(screen, buttons, outs, f12)
-        draw_hud(screen, (f12, f14), ins, outs, link.status, manual, len(world.boxes))
+        draw_world(canvas, world, f12)
+        draw_panel(canvas, panel, outs.O_Pnl_MachineReady, outs.O_Pnl_Alarm, f12)
+        draw_buttons(canvas, buttons, outs, f12)
+        draw_hud(canvas, (f12, f14), ins, outs, link.status, manual, len(world.boxes))
+
+        scale, ox, oy = fit_canvas(screen.get_size())
+        screen.fill((0, 0, 0))
+        scaled = pygame.transform.smoothscale(
+            canvas, (round(WIN_W * scale), round(WIN_H * scale)))
+        screen.blit(scaled, (ox, oy))
         pygame.display.flip()
         clock.tick(60)
 
         frame += 1
         if args.frames and frame >= args.frames:
             if args.screenshot:
-                pygame.image.save(screen, args.screenshot)
+                pygame.image.save(canvas, args.screenshot)
             running = False
 
     pygame.quit()

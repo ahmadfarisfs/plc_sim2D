@@ -87,9 +87,9 @@ class Lift:
 
         sv = 0.0
         if fwd and not rev:
-            sv = BELT_SPEED
-        elif rev and not fwd:
             sv = -BELT_SPEED
+        elif rev and not fwd:
+            sv = BELT_SPEED
         self.shape.surface_velocity = (sv, 0.0)
 
 
