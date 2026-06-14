@@ -16,13 +16,23 @@ Two modes:
 * McProtocolLink: Mitsubishi MC protocol (pymcprotocol). The PLC program runs
   with G_IsSimulated=TRUE so its inputs come from M devices: the sim batch-
   writes sensor bits to M200..M211 and batch-reads commands from Y0..Y16.
+
+* SoftPlcLink: no PLC at all -- runs the GX Works3 PLCopen XML export
+  in-process (see conveyor_sim.softplc), wired the way the real FX5U
+  hardware would be: sensor bits go to the X input devices SimIO reads
+  (FX5U_X_DEVICES, with the same NOT-polarity as the wiring) and
+  G_IsSimulated is forced FALSE, so the program runs its real-input branch
+  rather than GX Works3's internal M200.. debug path. The program's own ST
+  logic computes the outputs.
 """
+import os
 import socketserver
 import struct
 import threading
 import time
 
-from .iomap import MC_M_BASE, MC_Y_DEVICES, N_IN, N_OUT
+from .iomap import FX5U_X_DEVICES, JIG_COUNT_DEVICE, MC_M_BASE, MC_Y_DEVICES, OUT_NAMES, N_IN, N_OUT
+from .softplc import SoftPlc
 
 
 def _pack_bits(bits):
@@ -45,6 +55,7 @@ class ManualLink:
     """No PLC: outputs come only from the keyboard."""
 
     status = "no PLC (manual control)"
+    jig_count = None
 
     def push_inputs(self, bits):
         pass
@@ -181,6 +192,8 @@ class _Handler(socketserver.BaseRequestHandler):
 class ModbusServerLink:
     """Sim acts as Modbus TCP server; the real PLC connects as client."""
 
+    jig_count = None
+
     def __init__(self, host="0.0.0.0", port=5020):
         self.store = _Store()
         self.clients = 0
@@ -212,6 +225,8 @@ class ModbusServerLink:
 
 class ModbusClientLink:
     """Sim acts as Modbus TCP client; the PLC runs its built-in Modbus server."""
+
+    jig_count = None
 
     def __init__(self, host, port=502, device_id=1, in_base=0, out_base=16):
         from pymodbus.client import ModbusTcpClient
@@ -299,6 +314,7 @@ class McProtocolLink:
         self._lock = threading.Lock()
         self._in_bits = [False] * N_IN
         self._out_bits = [False] * N_OUT
+        self._jig_count = None
         self.ok = False
         self._connected = False
         self.last_error = ""
@@ -316,8 +332,10 @@ class McProtocolLink:
                     in_bits = [int(b) for b in self._in_bits]
                 self._mc.batchwrite_bitunits(self._head_m, in_bits)
                 ys = self._mc.batchread_bitunits(self._y_head, self._y_count)
+                jig_count = self._mc.batchread_wordunits(JIG_COUNT_DEVICE, 1)[0]
                 with self._lock:
                     self._out_bits = [bool(ys[i]) for i in self._y_index]
+                    self._jig_count = jig_count
                 self.ok = True
                 self.last_error = ""
                 time.sleep(0.02)
@@ -343,11 +361,52 @@ class McProtocolLink:
             return list(self._out_bits)
 
     @property
+    def jig_count(self):
+        with self._lock:
+            return self._jig_count
+
+    @property
     def status(self):
         if self.ok:
             return f"{self._desc} | OK"
         detail = f" ({self.last_error})" if self.last_error else ""
         return f"{self._desc} | reconnecting...{detail}"
+
+
+class SoftPlcLink:
+    """No PLC: runs the GX Works3 PLCopen XML export in-process, wired like
+    the real FX5U hardware.
+
+    ``G_IsSimulated`` is forced FALSE so the program reads its inputs from
+    the X devices (SimIO's real-input branch) instead of GX Works3's
+    internal M200.. debug mode. Sensor bits are written to those X devices
+    per FX5U_X_DEVICES (matching the wiring's NOT-polarity), then one scan
+    of the exported program runs; outputs are read back by name.
+    """
+
+    def __init__(self, xml_path):
+        self._plc = SoftPlc(xml_path)
+        self._plc.set("G_IsSimulated", False)
+        self._desc = f"soft PLC ({os.path.basename(xml_path)})"
+
+    def push_inputs(self, bits):
+        for bit, (device, invert) in zip(bits, FX5U_X_DEVICES):
+            self._plc.set_device(device, (not bit) if invert else bit)
+        self._plc.step()
+
+    def pull_outputs(self):
+        return [bool(self._plc.get(name)) for name in OUT_NAMES]
+
+    @property
+    def jig_count(self):
+        return self._plc.get("M_Jig_Conv_JigCount")
+
+    @property
+    def status(self):
+        ready = self._plc.get("M_Machine_Ready")
+        lft_a = self._plc.get("M_LftA_State")
+        lft_b = self._plc.get("M_Lftb_State")
+        return f"{self._desc} | ready={ready} LftA={lft_a} LftB={lft_b}"
 
 
 def make_link(args):
@@ -363,4 +422,8 @@ def make_link(args):
             raise SystemExit("--mode mc requires --host <PLC address>")
         return McProtocolLink(args.host, args.port or 5007, args.plctype,
                               args.m_base, 16 if args.y_radix == "hex" else 8)
+    if args.mode == "soft":
+        if not args.plc_xml:
+            raise SystemExit("--mode soft requires --plc-xml <exported project.xml>")
+        return SoftPlcLink(args.plc_xml)
     return ManualLink()

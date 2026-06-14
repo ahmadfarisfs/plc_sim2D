@@ -4,12 +4,13 @@ Run:  python -m conveyor_sim.main [--mode server|client|none] ...
 See README.md for the full I/O map and PLC wiring notes.
 """
 import argparse
+import math
 import sys
 
 import pygame
 
 from . import world as wd
-from .iomap import IN_NAMES, MC_M_BASE, MC_Y_DEVICES, OUT_NAMES, Outputs
+from .iomap import FX5U_X_DEVICES, IN_NAMES, MC_M_BASE, MC_Y_DEVICES, OUT_NAMES, Outputs
 from .plc import make_link
 
 WIN_W, WIN_H = wd.W, 900
@@ -143,6 +144,36 @@ def draw_panel(surf, panel, ready_on, alarm_on, f12):
     surf.blit(pygame.transform.smoothscale(tmp, panel.rect.size), panel.rect.topleft)
 
 
+class EStopButton:
+    """Standalone latching E-stop (NC contact) mounted near a lift.
+
+    Click to latch/release, like the panel's E-stop but independent of it.
+    """
+
+    def __init__(self, x, y, label):
+        self.pos = (x, y)
+        self.label = label
+        self.pressed = False
+
+    def mouse_down(self, p):
+        x, y = self.pos
+        if (p[0] - x) ** 2 + (p[1] - y) ** 2 <= 26 ** 2:
+            self.pressed = not self.pressed
+            return True
+        return False
+
+
+def draw_estop(surf, estop, f12):
+    x, y = estop.pos
+    pygame.draw.circle(surf, (240, 200, 40), (x, y), 26)
+    r = 17 if estop.pressed else 21
+    pygame.draw.circle(surf, (160, 20, 20) if estop.pressed else (215, 40, 40), (x, y), r)
+    color = (180, 30, 30) if estop.pressed else TXT
+    for i, ln in enumerate((estop.label, "PRESSED" if estop.pressed else "(NC)")):
+        t = f12.render(ln, True, color)
+        surf.blit(t, (x - t.get_width() // 2, y + 30 + 13 * i))
+
+
 class Button:
     """Small on-screen button: toggles an output signal or runs an action."""
 
@@ -203,15 +234,61 @@ def draw_buttons(surf, buttons, outs, f12):
                       b.rect.centery - t.get_height() // 2))
 
 
+class Slider:
+    """Horizontal slider: drag the handle to set a float value in [vmin, vmax]."""
+
+    def __init__(self, x, y, w, vmin, vmax, value, label, fmt="{:.0f}"):
+        self.rect = pygame.Rect(x, y, w, 16)
+        self.vmin, self.vmax = vmin, vmax
+        self.value = value
+        self.label = label
+        self.fmt = fmt
+        self.dragging = False
+
+    def _value_at(self, px):
+        frac = (px - self.rect.x) / self.rect.w
+        frac = max(0.0, min(1.0, frac))
+        return self.vmin + frac * (self.vmax - self.vmin)
+
+    def mouse_down(self, p):
+        if self.rect.inflate(0, 12).collidepoint(p):
+            self.dragging = True
+            self.value = self._value_at(p[0])
+            return True
+        return False
+
+    def mouse_motion(self, p):
+        if self.dragging:
+            self.value = self._value_at(p[0])
+
+    def mouse_up(self):
+        self.dragging = False
+
+
+def draw_slider(surf, slider, f12):
+    text = f"{slider.label}: {slider.fmt.format(slider.value)} px/s"
+    surf.blit(f12.render(text, True, TXT), (slider.rect.x, slider.rect.y - 16))
+    pygame.draw.rect(surf, (224, 225, 230), slider.rect, border_radius=8)
+    pygame.draw.rect(surf, (130, 130, 140), slider.rect, 1, border_radius=8)
+    frac = (slider.value - slider.vmin) / (slider.vmax - slider.vmin)
+    hx = slider.rect.x + int(frac * slider.rect.w)
+    pygame.draw.circle(surf, (80, 120, 200), (hx, slider.rect.centery), 9)
+    pygame.draw.circle(surf, (50, 80, 150), (hx, slider.rect.centery), 9, 1)
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Conveyor rig physics sim + Modbus TCP / Mitsubishi MC protocol")
-    p.add_argument("--mode", choices=["server", "client", "mc", "none"],
+    p.add_argument("--mode", choices=["server", "client", "mc", "soft", "none"],
                    default="server",
                    help="server: sim is Modbus slave, PLC polls it (default). "
                         "client: sim polls the PLC's Modbus server. "
                         "mc: Mitsubishi MC protocol, sensors -> M200.., cmds <- Y. "
+                        "soft: run a GX Works3 XML export in-process, no PLC; "
+                        "sensors -> X devices, cmds <- Y, like real FX5U wiring. "
                         "none: manual keyboard control only")
+    p.add_argument("--plc-xml", default=None,
+                   help="soft mode: path to the GX Works3 PLCopen XML export")
     p.add_argument("--host", default=None,
                    help="bind address (server, default 0.0.0.0) or PLC IP (client/mc)")
     p.add_argument("--port", type=int, default=None,
@@ -227,6 +304,8 @@ def parse_args(argv=None):
                    help="mc mode: first M device for sensor bits (default M200)")
     p.add_argument("--y-radix", choices=["oct", "hex"], default="oct",
                    help="mc mode: Y device numbering (FX is octal: Y7 -> Y10)")
+    p.add_argument("--long-speed", type=float, default=wd.LONG_SPEED,
+                   help=f"long conveyor belt speed, px/s (default {wd.LONG_SPEED})")
     p.add_argument("--frames", type=int, default=0,
                    help="exit after N frames (testing)")
     p.add_argument("--screenshot", default=None,
@@ -241,6 +320,22 @@ def draw_arrow(surf, color, a, b, w=3):
     for da in (2.6, -2.6):
         tip = (b[0] + 12 * math.cos(ang + da), b[1] + 12 * math.sin(ang + da))
         pygame.draw.line(surf, color, b, tip, w)
+
+
+_BOX_SURF = None
+
+
+def _box_surface():
+    global _BOX_SURF
+    if _BOX_SURF is None:
+        w, h = int(wd.BOX_W), int(wd.BOX_H)
+        radius = int(wd.BOX_RADIUS)
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+        rect = pygame.Rect(0, 0, w, h)
+        pygame.draw.rect(s, BOX_FILL, rect, border_radius=radius)
+        pygame.draw.rect(s, BOX_EDGE, rect, 2, border_radius=radius)
+        _BOX_SURF = s
+    return _BOX_SURF
 
 
 def draw_belt_rect(surf, x0, x1, y, running=False):
@@ -291,11 +386,11 @@ def draw_world(surf, world, f12):
         surf.blit(f12.render(label, True, DIM), (lift.x0 + 8, y + wd.BELT_H + 4))
 
     # boxes
+    box_img = _box_surface()
     for b in world.boxes:
-        for s in b.shapes:
-            pts = [b.local_to_world(v) for v in s.get_vertices()]
-            pygame.draw.polygon(surf, BOX_FILL, pts)
-            pygame.draw.polygon(surf, BOX_EDGE, pts, 2)
+        rotated = pygame.transform.rotate(box_img, -math.degrees(b.angle))
+        rect = rotated.get_rect(center=b.position)
+        surf.blit(rotated, rect)
 
     # spawn marker
     sx, sy = wd.SPAWN_POS
@@ -312,7 +407,20 @@ def draw_world(surf, world, f12):
         surf.blit(f12.render(s.name, True, TXT), (x - 30, y - 30))
 
 
-def draw_hud(surf, fonts, ins, outs, link_status, manual, n_boxes):
+def draw_jig_counter(surf, jig_count, f12, f14):
+    """Digital readout for the retentive jig counter (D2000, M_Jig_Conv_JigCount)."""
+    rect = pygame.Rect(WIN_W - 220, HUD_Y + 8, 200, 40)
+    pygame.draw.rect(surf, (30, 34, 40), rect, border_radius=6)
+    pygame.draw.rect(surf, (90, 95, 105), rect, 1, border_radius=6)
+    surf.blit(f12.render("D2000  M_Jig_Conv_JigCount", True, (170, 200, 220)),
+              (rect.x + 10, rect.y + 4))
+    text = "----" if jig_count is None else f"{jig_count:d}"
+    t = f14.render(text, True, (120, 230, 140))
+    surf.blit(t, (rect.right - 10 - t.get_width(), rect.y + 18))
+
+
+def draw_hud(surf, fonts, ins, outs, link_status, manual, n_boxes, in_title, in_addrs,
+              jig_count):
     f12, f14 = fonts
     pygame.draw.rect(surf, (238, 239, 243), pygame.Rect(0, HUD_Y, WIN_W, WIN_H - HUD_Y))
     pygame.draw.line(surf, (200, 200, 205), (0, HUD_Y), (WIN_W, HUD_Y), 1)
@@ -320,9 +428,11 @@ def draw_hud(surf, fonts, ins, outs, link_status, manual, n_boxes):
     src = "control: MANUAL (keyboard)" if manual else "control: PLC"
     surf.blit(f14.render(f"{link_status}   |   {src}   |   boxes: {n_boxes}",
                          True, WARN if manual else TXT), (20, HUD_Y + 10))
+    draw_jig_counter(surf, jig_count, f12, f14)
     surf.blit(f14.render(
         "SPACE spawn | right-click spawn at mouse | left-drag nudge | "
-        "C clear boxes | M toggle manual/PLC | ESC quit", True, DIM),
+        "C clear boxes | M toggle manual/PLC | ESC quit | "
+        "click E-STOP A/B mushrooms to latch/release", True, DIM),
         (20, HUD_Y + 32))
     surf.blit(f14.render(
         "manual: click the small buttons, or keys  1/2 LiftA up/down   "
@@ -338,8 +448,7 @@ def draw_hud(surf, fonts, ins, outs, link_status, manual, n_boxes):
             surf.blit(f12.render(f"{addrs[i]:>4}  {n}", True, TXT if v else DIM),
                       (x + 18, y))
 
-    column(20, "sensors -> PLC (M devices / Modbus DI)", IN_NAMES, ins.to_bits(),
-           [f"M{MC_M_BASE + i}" for i in range(len(IN_NAMES))])
+    column(20, in_title, IN_NAMES, ins.to_bits(), in_addrs)
     column(560, "PLC -> actuators (Y devices / Modbus coils)", OUT_NAMES,
            outs.to_bits(), MC_Y_DEVICES)
 
@@ -372,10 +481,21 @@ def main(argv=None):
     f12 = pygame.font.SysFont("menlo, monaco, consolas, monospace", 12)
     f14 = pygame.font.SysFont("menlo, monaco, consolas, monospace", 14)
 
-    world = wd.World()
+    world = wd.World(long_speed=args.long_speed)
     panel = Panel(40, 36)
+    estop_a = EStopButton((wd.LIFT_A_X0 + wd.LIFT_A_X1) / 2, 160, "E-STOP A")
+    estop_b = EStopButton((wd.LIFT_B_X0 + wd.LIFT_B_X1) / 2, 160, "E-STOP B")
     buttons = make_buttons()
+    speed_slider = Slider(1000, HUD_Y + 108, 300, 0.0, 300.0,
+                          args.long_speed, "long conveyor speed")
     manual = args.mode == "none"
+
+    if args.mode == "soft":
+        in_title = "sensors -> PLC (X devices, FX5U wiring)"
+        in_addrs = [f"{'!' if invert else ''}{dev}" for dev, invert in FX5U_X_DEVICES]
+    else:
+        in_title = "sensors -> PLC (M devices / Modbus DI)"
+        in_addrs = [f"M{MC_M_BASE + i}" for i in range(len(IN_NAMES))]
     manual_out = Outputs()
     dt = 1.0 / 60.0
     frame = 0
@@ -406,7 +526,8 @@ def main(argv=None):
                         setattr(manual_out, OPPOSITE[name], False)
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                 pos = to_canvas(e.pos, scale, ox, oy)
-                if not panel.mouse_down(pos):
+                if not speed_slider.mouse_down(pos) and not panel.mouse_down(pos) \
+                        and not estop_a.mouse_down(pos) and not estop_b.mouse_down(pos):
                     hit = buttons_click(buttons, pos, world, manual_out)
                     if hit == "toggled":
                         manual = True    # motor buttons drive manual control
@@ -415,10 +536,15 @@ def main(argv=None):
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 3:
                 world.spawn_box(to_canvas(e.pos, scale, ox, oy))
             elif e.type == pygame.MOUSEMOTION:
-                world.move_mouse(to_canvas(e.pos, scale, ox, oy))
+                pos = to_canvas(e.pos, scale, ox, oy)
+                speed_slider.mouse_motion(pos)
+                world.move_mouse(pos)
             elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
+                speed_slider.mouse_up()
                 panel.mouse_up()
                 world.release()
+
+        world.long_speed = speed_slider.value
 
         if manual:
             outs = manual_out
@@ -429,12 +555,18 @@ def main(argv=None):
         ins.I_Pnl_EStop = not panel.estop_pressed   # NC: contact opens when pressed
         ins.I_Pnl_MachineStartPB = panel.pb_start
         ins.I_Pnl_SeqStartPB = panel.pb_seq
+        ins.I_LftA_EmergencyStop = not estop_a.pressed
+        ins.I_LftB_EmergencyStop = not estop_b.pressed
         link.push_inputs(ins.to_bits())
 
         draw_world(canvas, world, f12)
         draw_panel(canvas, panel, outs.O_Pnl_MachineReady, outs.O_Pnl_Alarm, f12)
+        draw_estop(canvas, estop_a, f12)
+        draw_estop(canvas, estop_b, f12)
         draw_buttons(canvas, buttons, outs, f12)
-        draw_hud(canvas, (f12, f14), ins, outs, link.status, manual, len(world.boxes))
+        draw_hud(canvas, (f12, f14), ins, outs, link.status, manual, len(world.boxes),
+                 in_title, in_addrs, getattr(link, "jig_count", None))
+        draw_slider(canvas, speed_slider, f12)
 
         scale, ox, oy = fit_canvas(screen.get_size())
         screen.fill((0, 0, 0))

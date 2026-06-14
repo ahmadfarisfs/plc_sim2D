@@ -24,7 +24,8 @@ LIFT_SPEED = 90.0          # px/s vertical travel
 BELT_SPEED = 130.0         # px/s lift belt surface speed
 LONG_SPEED = 130.0         # px/s long conveyor, fixed direction: leftward only
 
-BOX_W, BOX_H = 56.0, 40.0
+BOX_W, BOX_H = 200.0, 30.0
+BOX_RADIUS = 6.0           # rounded corners: avoids snagging on belt seams
 BOX_MASS = 1.0
 SPAWN_POS = (1060.0, 140.0)
 MAX_BOXES = 15
@@ -111,10 +112,11 @@ class Sensor:
 
 
 class World:
-    def __init__(self):
+    def __init__(self, long_speed=LONG_SPEED):
         self.space = pymunk.Space()
         self.space.gravity = (0.0, 900.0)
         self.boxes = []
+        self.long_speed = long_speed
 
         # placon line: undriven, boxes only move when pushed with the mouse
         self.placon = self._belt(PLACON_X0, PLACON_X1, Y_TOP, friction=0.55)
@@ -160,7 +162,8 @@ class World:
             return None
         body = pymunk.Body(BOX_MASS, pymunk.moment_for_box(BOX_MASS, (BOX_W, BOX_H)))
         body.position = pos
-        shape = pymunk.Poly.create_box(body, (BOX_W, BOX_H))
+        shape = pymunk.Poly.create_box(
+            body, (BOX_W - 2 * BOX_RADIUS, BOX_H - 2 * BOX_RADIUS), radius=BOX_RADIUS)
         shape.friction = 0.8
         shape.filter = pymunk.ShapeFilter(categories=CAT_BOX)
         self.space.add(body, shape)
@@ -205,7 +208,7 @@ class World:
                           out.O_LftB_BeltFwd, out.O_LftB_BeltRev, dt)
         # long conveyor is single-direction by construction (leftward)
         self.long.surface_velocity = \
-            (-LONG_SPEED if out.O_Conv_BeltFwd else 0.0, 0.0)
+            (-self.long_speed if out.O_Conv_BeltFwd else 0.0, 0.0)
 
         sub = dt / substeps
         for _ in range(substeps):

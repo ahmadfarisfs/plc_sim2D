@@ -25,6 +25,9 @@ so you can test the PLC logic against simulated material flow.
   MACHINE READY and ALARM lamps driven by the PLC. The panel has **no
   behavior in the sim** — buttons are raw inputs, lamps are raw outputs;
   all logic belongs in the PLC.
+* **Lifter E-stops**: each lift (A and B) has its own mushroom E-stop button
+  drawn above it (NC contact, click to latch/release), independent of the
+  panel E-stop.
 * Boxes can fall into the pit if the PLC discharges a belt when the lift is
   at the wrong level — that's the point: bad logic is visible.
 
@@ -47,6 +50,9 @@ python3 -m venv .venv
 # Modbus: your PLC is the server instead -> sim polls it
 .venv/bin/python -m conveyor_sim.main --mode client --host 192.168.1.10 \
     --in-base 0 --out-base 16
+
+# soft PLC: run the GX Works3 PLCopen XML export in-process, no PLC needed
+.venv/bin/python -m conveyor_sim.main --mode soft --plc-xml Kawai120626.xml
 
 # no PLC: play with keyboard/buttons only
 .venv/bin/python -m conveyor_sim.main --mode none
@@ -88,22 +94,55 @@ Sensors, sim -> PLC:
 | M209 | `I_LftB_DnLimit` | lift B lower limit switch |
 | M210 | `I_Conv_BeltEnd` | box at discharge end of long conveyor |
 | M211 | `I_Placon_Full` | box at left end of placon line |
+| M212 | `I_LftA_EmergencyStop` | e-stop NC contact at Lifter A: 1 = healthy, 0 = pressed |
+| M213 | `I_LftB_EmergencyStop` | e-stop NC contact at Lifter B: 1 = healthy, 0 = pressed |
 
 Commands, PLC -> sim:
 
 | Y device | signal | meaning |
 |------|--------|---------|
-| Y0 | `O_LftA_LiftUp` | lift A raise |
-| Y1 | `O_LftA_LiftDown` | lift A lower |
-| Y2 | `O_LftA_BeltFwd` | conveyor A belt forward (+x, toward placon) |
-| Y3 | `O_LftA_BeltRev` | conveyor A belt reverse (-x) |
-| Y4 | `O_LftB_LiftUp` | lift B raise |
-| Y5 | `O_LftB_LiftDown` | lift B lower |
-| Y6 | `O_LftB_BeltFwd` | conveyor B belt forward (+x) |
-| Y7 | `O_LftB_BeltRev` | conveyor B belt reverse (-x, toward long conveyor) |
+| Y0 | `O_LftA_LiftDown` | lift A lower |
+| Y1 | `O_LftA_LiftUp` | lift A raise |
+| Y2 | `O_LftA_BeltRev` | conveyor A belt reverse (-x) |
+| Y3 | `O_LftA_BeltFwd` | conveyor A belt forward (+x, toward placon) |
+| Y4 | `O_LftB_LiftDown` | lift B lower |
+| Y5 | `O_LftB_LiftUp` | lift B raise |
+| Y6 | `O_LftB_BeltRev` | conveyor B belt reverse (-x, toward long conveyor) |
+| Y7 | `O_LftB_BeltFwd` | conveyor B belt forward (+x) |
 | Y10 | `O_Conv_BeltFwd` | long conveyor run (always leftward) |
 | Y11 | `O_Pnl_MachineReady` | panel lamp: machine ready |
 | Y16 | `O_Pnl_Alarm` | panel lamp: alarm |
+
+## Soft PLC mode (`--mode soft --plc-xml <file>`)
+
+No hardware or network PLC at all: `--plc-xml` points at a **PLCopen XML**
+export of the GX Works3 project (Project > right-click > Export to PLCopen
+XML format). [conveyor_sim/softplc/](conveyor_sim/softplc/) parses that file —
+global labels, POUs and their Structured Text bodies, and the
+initial/scan execution order — and runs the actual program logic each frame,
+wired the same way the real **FX5U** hardware is (`G_IsSimulated := FALSE`):
+
+* sensor bits are written to the **X input devices** SimIO's real-input
+  branch reads (`X15`, `X16`, `X13`, `X3`, `X0`, `X1`, `X11`, `X12`, `X7`,
+  `X10`, `X2`, `X4`, `X5`, `X14` — see `FX5U_X_DEVICES` in
+  [conveyor_sim/iomap.py](conveyor_sim/iomap.py)), with the same
+  `NOT`-polarity as the wiring (e.g. `I_LftA_UpLimit := NOT X0`),
+* `O_*` outputs are read back by name from the program's global variables
+  (each is directly mapped to a `Y` device, e.g. `O_Pnl_MachineReady` =
+  `Y11`).
+
+The soft PLC runtime itself ([conveyor_sim/softplc/runtime.py](conveyor_sim/softplc/runtime.py))
+is generic — it doesn't special-case `G_IsSimulated` or any other variable,
+it just runs the program with whatever initial values the XML declares.
+`SoftPlcLink` is what makes it behave like this specific FX5U.
+
+The interpreter supports the subset of ST this project uses: `IF/ELSIF/ELSE`,
+`CASE...OF`, assignments, `RETURN`, `AND/OR/NOT` and comparison/arithmetic
+expressions, dotted member access (e.g. `TP_Eject.S`), and the `OUT_T`
+(TON-style timer) / `PLS` (rising-edge pulse) function calls. If you edit the
+program in GX Works3 and stay within that subset, just re-export the XML and
+re-run — no code changes needed. The HUD status line shows the soft PLC's
+live state (`M_Machine_Ready`, `M_LftA_State`, `M_Lftb_State`).
 
 ## Modbus TCP mode (zero-based addressing)
 
@@ -136,6 +175,7 @@ addresses.
 | `C` | clear all boxes |
 | `M` | toggle manual / PLC control |
 | `ESC` | quit |
+| click E-STOP A/B | latch/release the lift-side e-stops |
 
 Keys and buttons are toggles; turning on a motion turns off its opposite.
 Lifts stop automatically at their limits, motors with both directions
@@ -146,6 +186,7 @@ commanded stop.
 ```sh
 .venv/bin/python tests/test_physics.py   # belts, lifts, limits, sensors
 .venv/bin/python tests/test_modbus.py    # Modbus loopback (client vs server)
+.venv/bin/python tests/test_softplc.py   # soft PLC: runs the exported ST program
 ```
 
 ## Layout
@@ -156,6 +197,9 @@ commanded stop.
 * `conveyor_sim/iomap.py` — signal names (matching the PLC program) and the
   M/Y device map and bit order.
 * `conveyor_sim/plc.py` — MC protocol client, Modbus TCP server
-  (self-contained, zero-based) and Modbus client mode.
+  (self-contained, zero-based), Modbus client mode, and the soft PLC link.
+* `conveyor_sim/softplc/` — soft PLC: PLCopen XML loader (`project.py`), a
+  Structured Text lexer/parser/interpreter (`st_lang.py`), and the scan
+  runtime (`runtime.py`).
 * `conveyor_sim/main.py` — pygame rendering, HUD, panel, buttons,
   keyboard/mouse handling.

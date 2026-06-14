@@ -34,22 +34,24 @@ PERIPHERALS = {
     "Lifter A": [
         ("O_LftA_LiftUp",   "Y1"),
         ("O_LftA_LiftDown", "Y0"),
-        ("O_LftA_BeltFwd",  "Y2"),
-        ("O_LftA_BeltRev",  "Y3"),
+        ("O_LftA_BeltFwd",  "Y3"),
+        ("O_LftA_BeltRev",  "Y2"),
         ("I_LftA_BeltEnd",  "X3"),
         ("I_LftA_UpLimit",  "X0"),
         ("I_LftA_DnLimit",  "X1"),
+        ("I_LftA_EmergencyStop", "X5"),
     ],
 
     "Lifter B": [
-        ("O_LftB_LiftUp",    "Y4"),
-        ("O_LftB_LiftDown",  "Y5"),
-        ("O_LftB_BeltFwd",   "Y6"),
-        ("O_LftB_BeltRev",   "Y7"),
+        ("O_LftB_LiftUp",    "Y5"),
+        ("O_LftB_LiftDown",  "Y4"),
+        ("O_LftB_BeltFwd",   "Y7"),
+        ("O_LftB_BeltRev",   "Y6"),
         ("I_LftB_BeltStart", "X11"),
         ("I_LftB_BeltEnd",   "X12"),
         ("I_LftB_UpLimit",   "X7"),
         ("I_LftB_DnLimit",   "X10"),
+        ("I_LftB_EmergencyStop", "X14"),
     ],
 
     "Conveyor": [
