@@ -64,7 +64,7 @@ PERIPHERALS = {
         ("I_Pnl_EStop",        "X15"),
         ("I_Pnl_MachineStartPB", "X16"),
         ("I_Pnl_SeqStartPB",   "X13"),
-        ("O_Pnl_MachineReady", "Y11"),
+        ("O_Pnl_LampReady",    "Y11"),
         ("O_Pnl_Alarm",        "Y16"),
     ],
 }
